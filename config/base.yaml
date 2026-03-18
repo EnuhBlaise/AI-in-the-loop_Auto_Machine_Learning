@@ -1,0 +1,80 @@
+# ============================================================================
+# BioML Autopilot — Base Configuration
+# ============================================================================
+
+data:
+  path: "yeast.csv"
+  target_column: "name"
+  test_size: 0.2
+  val_size: 0.2
+  random_state: 42
+  scaler: "standard"            # standard | robust | minmax | none
+  augmentation:
+    mixup: true
+    mixup_alpha: 0.2
+
+model:
+  architecture: "mlp"           # mlp | cnn1d | transformer | ensemble
+  mlp:
+    hidden_dims: [128, 64, 32]
+    dropout: 0.3
+    activation: "gelu"          # gelu | relu | silu
+    use_residual: true
+    use_batchnorm: true
+  cnn1d:
+    channels: [64, 128, 64]
+    kernel_size: 3
+    dropout: 0.3
+    pool: "adaptive_avg"
+  transformer:
+    d_model: 64
+    n_heads: 4
+    n_layers: 2
+    dropout: 0.2
+    dim_feedforward: 128
+  ensemble:
+    models: ["mlp", "cnn1d", "transformer"]
+    strategy: "soft_vote"       # soft_vote | stacking
+
+training:
+  batch_size: 64
+  epochs: 200
+  optimizer: "adamw"            # adam | adamw | sgd
+  lr: 0.001
+  weight_decay: 0.0001
+  scheduler: "cosine"           # cosine | step | plateau | onecycle
+  scheduler_params:
+    T_max: 200
+    eta_min: 0.000001
+  gradient_clip: 1.0
+  label_smoothing: 0.1
+  class_weighting: true         # inverse-frequency class weights
+  oversampling: true            # weighted random sampler
+  early_stopping:
+    enabled: true
+    patience: 30
+    metric: "val_auroc"
+    mode: "max"
+  mixed_precision: false
+
+evaluation:
+  primary_metric: "val_auroc"
+  secondary_metrics: ["val_f1", "val_accuracy"]
+  eval_interval: 5              # evaluate every N epochs
+
+experiment:
+  base_dir: "experiments"
+  time_budget: 300              # seconds per experiment
+
+llm:
+  provider: "huggingface"
+  model: "mistralai/Mistral-7B-Instruct-v0.3"
+  max_proposals_per_round: 1
+  temperature: 0.7
+  max_tokens: 4096
+
+autonomous:
+  max_experiments: 20
+  stop_on_plateau: true
+  plateau_patience: 5           # stop if no improvement for N experiments
+  plateau_threshold: 0.001

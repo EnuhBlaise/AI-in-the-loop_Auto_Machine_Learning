@@ -1,0 +1,142 @@
+# ============================================================================
+# BioML Autopilot — Hyperparameter Search Space
+# ============================================================================
+# The LLM agent uses this to understand what it can explore.
+# Each parameter specifies type, range, and description.
+# ============================================================================
+
+search_space:
+  model.architecture:
+    type: categorical
+    values: ["mlp", "cnn1d", "transformer", "ensemble"]
+    description: "Model architecture to use"
+
+  # --- MLP ---
+  model.mlp.hidden_dims:
+    type: list_of_int
+    min_length: 1
+    max_length: 5
+    value_range: [16, 512]
+    description: "Hidden layer dimensions for MLP (e.g. [256, 128, 64])"
+
+  model.mlp.dropout:
+    type: float
+    range: [0.0, 0.6]
+    description: "Dropout rate for MLP layers"
+
+  model.mlp.activation:
+    type: categorical
+    values: ["gelu", "relu", "silu"]
+    description: "Activation function"
+
+  model.mlp.use_residual:
+    type: boolean
+    description: "Whether to use residual/skip connections"
+
+  model.mlp.use_batchnorm:
+    type: boolean
+    description: "Whether to use batch normalization"
+
+  # --- 1D CNN ---
+  model.cnn1d.channels:
+    type: list_of_int
+    min_length: 1
+    max_length: 4
+    value_range: [16, 256]
+    description: "Channel sizes for 1D CNN layers"
+
+  model.cnn1d.kernel_size:
+    type: int
+    range: [1, 5]
+    description: "Convolution kernel size"
+
+  model.cnn1d.dropout:
+    type: float
+    range: [0.0, 0.5]
+    description: "Dropout rate for CNN"
+
+  # --- Transformer ---
+  model.transformer.d_model:
+    type: int
+    range: [16, 128]
+    description: "Transformer embedding dimension"
+
+  model.transformer.n_heads:
+    type: categorical
+    values: [1, 2, 4, 8]
+    description: "Number of attention heads (must divide d_model)"
+
+  model.transformer.n_layers:
+    type: int
+    range: [1, 4]
+    description: "Number of transformer encoder layers"
+
+  model.transformer.dropout:
+    type: float
+    range: [0.0, 0.5]
+    description: "Transformer dropout rate"
+
+  # --- Training ---
+  training.batch_size:
+    type: categorical
+    values: [16, 32, 64, 128, 256]
+    description: "Training batch size"
+
+  training.lr:
+    type: float
+    range: [0.00001, 0.01]
+    log_scale: true
+    description: "Learning rate"
+
+  training.weight_decay:
+    type: float
+    range: [0.0, 0.01]
+    description: "Weight decay (L2 regularization)"
+
+  training.optimizer:
+    type: categorical
+    values: ["adam", "adamw", "sgd"]
+    description: "Optimizer algorithm"
+
+  training.scheduler:
+    type: categorical
+    values: ["cosine", "step", "plateau", "onecycle"]
+    description: "Learning rate scheduler"
+
+  training.label_smoothing:
+    type: float
+    range: [0.0, 0.3]
+    description: "Label smoothing factor"
+
+  training.gradient_clip:
+    type: float
+    range: [0.0, 5.0]
+    description: "Max gradient norm for clipping (0 = disabled)"
+
+  # --- Data/Augmentation ---
+  data.scaler:
+    type: categorical
+    values: ["standard", "robust", "minmax", "none"]
+    description: "Feature scaling strategy"
+
+  data.augmentation.mixup:
+    type: boolean
+    description: "Whether to use mixup data augmentation"
+
+  data.augmentation.mixup_alpha:
+    type: float
+    range: [0.05, 1.0]
+    description: "Mixup interpolation alpha (higher = more mixing)"
+
+  training.class_weighting:
+    type: boolean
+    description: "Use inverse-frequency class weights in loss"
+
+  training.oversampling:
+    type: boolean
+    description: "Use weighted random sampler for oversampling minority classes"
+
+  training.epochs:
+    type: int
+    range: [50, 500]
+    description: "Maximum training epochs (within time budget)"
