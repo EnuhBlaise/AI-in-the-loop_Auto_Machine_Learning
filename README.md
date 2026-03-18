@@ -8,9 +8,12 @@ BioML Autopilot tackles the protein localization classification problem on the [
 
 ### Key Features
 
-- **LLM-in-the-loop**: HuggingFace-hosted LLM acts as a scientific advisor, proposing experiments, analyzing results, and deciding when to stop
+- **LLM-in-the-loop**: HuggingFace-hosted LLM (default: Qwen 3.5) acts as a scientific advisor, proposing experiments, analyzing results, and deciding when to stop
 - **Multiple architectures**: MLP (with residual connections), 1D CNN, TabTransformer, and Ensemble (soft voting)
 - **Autonomous research loop**: No human intervention needed — the system explores the search space, tracks experiments, detects duplicates, and generates a final report
+- **Verbose output**: Every experiment prints detailed configuration, LLM call info, and model being queried — full transparency into the autonomous pipeline
+- **Per-experiment training curves**: Automatically generates loss, accuracy, AUC-ROC, and learning rate schedule plots for each experiment
+- **Winning model analysis**: Generates confusion matrix, per-class ROC curves, gradient-based feature importance, t-SNE of learned representations, and prediction confidence distributions
 - **Graceful fallback**: Runs random search if no HuggingFace API key is provided
 - **Configurable**: YAML-based configuration with CLI overrides and environment variable support
 
@@ -22,6 +25,29 @@ The visualization below shows the performance comparison (val_auroc, val_f1, val
 
 **Best result**: CNN1D architecture achieved the highest val_auroc of **0.863** (exp_004).
 
+## Per-Experiment Visualizations
+
+Each experiment automatically generates training curves saved to `experiments/<exp_id>/training_curves.png`:
+
+- **Training loss** over epochs
+- **Validation AUC-ROC** with best epoch highlighted
+- **Validation accuracy & F1** over epochs
+- **Learning rate schedule** (log scale)
+
+## Winning Model Analysis
+
+At the end of an autonomous run, the system generates comprehensive visualizations for the best-performing model:
+
+| Figure | Description |
+|---|---|
+| `confusion_matrix.png` | Per-class confusion matrix on validation data |
+| `roc_curves.png` | Per-class ROC curves with individual AUC values |
+| `feature_importance.png` | Gradient-based saliency showing which input features matter most |
+| `learned_representations.png` | Side-by-side t-SNE comparing raw inputs vs. model's learned representations |
+| `confidence_distribution.png` | Prediction confidence histograms for correct vs. incorrect predictions |
+
+All figures are saved in the winning experiment's directory (e.g., `experiments/exp_004/`).
+
 ## Project Structure
 
 ```
@@ -31,14 +57,14 @@ The visualization below shows the performance comparison (val_auroc, val_f1, val
 ├── src/
 │   ├── cli.py                 # Click CLI interface
 │   ├── config.py              # Config loading & merging
-│   ├── orchestrator.py        # Core autonomous loop
+│   ├── orchestrator.py        # Core autonomous loop + visualization
 │   ├── data/
 │   │   ├── loader.py          # Data loading, splitting, scaling
 │   │   └── augmentation.py    # Mixup augmentation
 │   ├── llm/
-│   │   ├── agent.py           # HuggingFace LLM integration
+│   │   ├── agent.py           # HuggingFace LLM integration (verbose)
 │   │   ├── prompts.py         # Prompt templates
-│   │   └── parser.py          # JSON parsing & validation
+│   │   └── parser.py          # JSON parsing & validation (Qwen-compatible)
 │   ├── models/
 │   │   ├── factory.py         # Model registry & factory
 │   │   ├── mlp.py             # MLP with residual connections
@@ -46,19 +72,19 @@ The visualization below shows the performance comparison (val_auroc, val_f1, val
 │   │   ├── transformer.py     # TabTransformer
 │   │   └── ensemble.py        # Ensemble (soft voting)
 │   ├── training/
-│   │   ├── trainer.py         # Training loop
+│   │   ├── trainer.py         # Training loop (with epoch history tracking)
 │   │   ├── evaluator.py       # Metrics (AUC-ROC, F1, Accuracy)
 │   │   └── callbacks.py       # Early stopping & checkpointing
 │   └── experiment/
 │       ├── tracker.py         # Experiment lifecycle tracking
 │       └── registry.py        # Duplicate detection
-├── experiments/               # Experiment results output
+├── experiments/               # Experiment results + figures output
 ├── train.py                   # Main entry point
 ├── run_autonomous.py          # Shortcut for autonomous mode
-├── visualize.py               # Generate performance visualization
+├── visualize.py               # Generate cross-experiment performance chart
 ├── prepare.py                 # Data preparation
 ├── yeast.csv                  # Dataset
-└── .env                       # HuggingFace API key (not tracked in git)
+└── .env                       # HuggingFace API key & model config (not tracked in git)
 ```
 
 ## Setup
@@ -77,10 +103,11 @@ Create a `.env` file in the project root (it is already gitignored):
 cp .env.example .env
 ```
 
-Then edit `.env` and add your HuggingFace token:
+Then edit `.env` and add your HuggingFace token and model:
 
 ```
 HF_TOKEN=hf_your_actual_token_here
+BIOML_LLM_MODEL=Qwen/Qwen3.5-397B-A17B
 ```
 
 Get your token at: https://huggingface.co/settings/tokens
@@ -129,7 +156,7 @@ python run_autonomous.py -n 5
 # Leaderboard
 python train.py --leaderboard
 
-# Generate performance visualization
+# Generate cross-experiment performance visualization
 python visualize.py
 ```
 
@@ -143,11 +170,23 @@ bioml-autopilot leaderboard --top 10
 
 ## How It Works
 
-1. **LLM Proposal** — The LLM receives experiment history, the search space, and dataset info, then proposes the next experiment configuration with reasoning
-2. **Training** — The system trains the proposed model with early stopping, gradient clipping, and optional mixup augmentation
-3. **Evaluation** — Models are evaluated on val_auroc (macro one-vs-rest AUC-ROC), val_f1, and val_accuracy
-4. **Analysis** — Every 3 experiments, the LLM analyzes all results and decides whether to continue or stop
-5. **Report** — A final markdown report is generated with findings and recommendations
+1. **LLM Proposal** — The LLM receives experiment history, the search space, and dataset info, then proposes the next experiment configuration with scientific reasoning
+2. **Verbose Config Display** — The full experiment configuration (architecture, hyperparameters, optimizer, scheduler, etc.) is printed before training begins
+3. **Training** — The system trains the proposed model with early stopping, gradient clipping, and optional mixup augmentation while recording per-epoch metrics
+4. **Training Curves** — After each experiment, training loss, validation metrics, and learning rate curves are plotted and saved
+5. **Evaluation** — Models are evaluated on val_auroc (macro one-vs-rest AUC-ROC), val_f1, and val_accuracy
+6. **Analysis** — Every 3 experiments, the LLM analyzes all results and decides whether to continue or stop
+7. **Winner Analysis** — The best model is analyzed with confusion matrix, ROC curves, feature importance, learned representation t-SNE, and confidence distributions
+8. **Report** — A final markdown report is generated with findings and recommendations
+
+### Verbose Output
+
+The system provides full transparency at every step:
+
+- **LLM calls**: Shows which model is being called, the purpose of each call, response status, and error details if a call fails
+- **Experiment config**: Prints a detailed panel with all hyperparameters (architecture params, optimizer, LR, batch size, scheduler, regularization, etc.)
+- **Results**: Shows all metrics in a formatted panel after each experiment
+- **Figures**: Reports which visualizations were generated and where they were saved
 
 ### Stopping Criteria
 

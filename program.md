@@ -35,10 +35,12 @@ The system operates as a closed-loop autonomous research agent:
 
 ## LLM Integration
 - **Provider**: HuggingFace Inference API (serverless or dedicated endpoint)
+- **Default Model**: Qwen 3.5 (`Qwen/Qwen3.5-397B-A17B`) — configurable via `BIOML_LLM_MODEL` in `.env`
 - **Role**: Scientific advisor — proposes experiments, analyzes results, draws conclusions
 - **Autonomy**: The LLM makes ALL decisions — architecture, hyperparameters, strategies,
   and when to stop. No human intervention required during a run.
 - **Output**: Structured JSON configs for experiment proposals + natural language analysis
+- **Verbose Logging**: Every LLM call prints the model being queried, purpose, call count, and response status
 
 ## Model Architectures to Explore
 - MLP with residual connections and batch normalization
@@ -73,3 +75,10 @@ After the autonomous run completes, the system produces:
 - The best model checkpoint
 - A final LLM-generated analysis report with conclusions
 - All experiment configs and metrics in structured JSON
+- **Per-experiment training curves** (loss, AUC-ROC, accuracy/F1, learning rate schedule)
+- **Winning model analysis figures**:
+  - Confusion matrix
+  - Per-class ROC curves
+  - Gradient-based feature importance (saliency)
+  - t-SNE of raw inputs vs. learned representations
+  - Prediction confidence distribution (correct vs. incorrect)

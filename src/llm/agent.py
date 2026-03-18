@@ -6,6 +6,9 @@ import logging
 
 from huggingface_hub import InferenceClient
 
+from rich.console import Console
+from rich.panel import Panel
+
 from src.llm.prompts import (
     SYSTEM_PROMPT,
     PROPOSE_EXPERIMENT_PROMPT,
@@ -15,6 +18,7 @@ from src.llm.prompts import (
 from src.llm.parser import extract_json, validate_experiment_config, validate_analysis
 
 logger = logging.getLogger(__name__)
+console = Console()
 
 
 class LLMAgent:
@@ -32,33 +36,63 @@ class LLMAgent:
         self.max_tokens = self.config.get("max_tokens", 4096)
 
         token = self.config.get("hf_token") or os.environ.get("HF_TOKEN")
+
+        console.print(Panel(
+            f"[bold]LLM Provider:[/bold] HuggingFace Inference API\n"
+            f"[bold]Model:[/bold] {self.model_id}\n"
+            f"[bold]Temperature:[/bold] {self.temperature}\n"
+            f"[bold]Max tokens:[/bold] {self.max_tokens}\n"
+            f"[bold]HF Token:[/bold] {'[green]configured[/green]' if token else '[red]MISSING[/red]'}",
+            title="LLM Configuration",
+            border_style="cyan",
+        ))
+
         if not token:
-            logger.warning(
-                "No HF_TOKEN found. Set HF_TOKEN env var or hf_token in config. "
-                "Falling back to fallback mode (random proposals)."
+            console.print(
+                "[bold red]WARNING:[/bold red] No HF_TOKEN found. "
+                "Set HF_TOKEN in .env or as env var. "
+                "Falling back to random proposals (no LLM)."
             )
 
         self.client = InferenceClient(token=token) if token else None
         self._fallback = self.client is None
+        self._call_count = 0
 
-    def _call_llm(self, prompt: str) -> str:
+    def _call_llm(self, prompt: str, purpose: str = "general") -> str:
         """Send a prompt to the HuggingFace LLM and return the response text."""
         if self._fallback:
             raise RuntimeError("No HF_TOKEN — cannot call LLM")
+
+        self._call_count += 1
+        console.print(
+            f"  [cyan]LLM call #{self._call_count}[/cyan] | "
+            f"Model: [bold]{self.model_id}[/bold] | Purpose: {purpose}"
+        )
 
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prompt},
         ]
 
-        response = self.client.chat_completion(
-            model=self.model_id,
-            messages=messages,
-            temperature=self.temperature,
-            max_tokens=self.max_tokens,
-        )
+        try:
+            response = self.client.chat_completion(
+                model=self.model_id,
+                messages=messages,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+            )
+        except Exception as e:
+            console.print(
+                f"  [bold red]LLM API call FAILED:[/bold red] {type(e).__name__}: {e}\n"
+                f"  [yellow]Model requested: {self.model_id}[/yellow]\n"
+                f"  [yellow]Check that the model ID is valid and available via "
+                f"HuggingFace Inference API (serverless or dedicated endpoint).[/yellow]"
+            )
+            raise
 
-        return response.choices[0].message.content
+        content = response.choices[0].message.content
+        console.print(f"  [green]LLM responded[/green] ({len(content)} chars)")
+        return content
 
     def propose_experiment(
         self,
@@ -96,15 +130,20 @@ class LLMAgent:
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                response_text = self._call_llm(prompt)
+                response_text = self._call_llm(prompt, purpose="propose_experiment")
                 logger.info(f"LLM response (attempt {attempt + 1}):\n{response_text[:500]}")
                 parsed = extract_json(response_text)
                 validated = validate_experiment_config(parsed)
                 return validated
             except (ValueError, KeyError, json.JSONDecodeError) as e:
-                logger.warning(f"LLM response parse failed (attempt {attempt + 1}): {e}")
+                console.print(f"  [yellow]Parse failed (attempt {attempt + 1}/{max_retries}): {e}[/yellow]")
                 if attempt == max_retries - 1:
-                    logger.error("All LLM retries failed, using fallback proposal")
+                    console.print("  [red]All LLM retries failed — using fallback random proposal[/red]")
+                    return self._fallback_proposal(dataset_info)
+            except Exception as e:
+                console.print(f"  [red]LLM call failed (attempt {attempt + 1}/{max_retries}): {e}[/red]")
+                if attempt == max_retries - 1:
+                    console.print("  [red]All LLM retries failed — using fallback random proposal[/red]")
                     return self._fallback_proposal(dataset_info)
 
     def analyze_results(self, experiment_history: str, current_best: str) -> dict:
@@ -128,11 +167,11 @@ class LLMAgent:
         )
 
         try:
-            response_text = self._call_llm(prompt)
+            response_text = self._call_llm(prompt, purpose="analyze_results")
             parsed = extract_json(response_text)
             return validate_analysis(parsed)
         except Exception as e:
-            logger.warning(f"LLM analysis failed: {e}")
+            console.print(f"  [red]LLM analysis failed: {e}[/red]")
             return {
                 "analysis": f"Analysis failed: {e}",
                 "should_continue": True,
@@ -151,9 +190,9 @@ class LLMAgent:
         )
 
         try:
-            return self._call_llm(prompt)
+            return self._call_llm(prompt, purpose="generate_report")
         except Exception as e:
-            logger.warning(f"LLM report generation failed: {e}")
+            console.print(f"  [red]LLM report generation failed: {e}[/red]")
             return self._fallback_report(experiment_history, best_result)
 
     # ------------------------------------------------------------------

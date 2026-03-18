@@ -11,11 +11,18 @@ import logging
 import time
 from pathlib import Path
 
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
 import torch
+import torch.nn.functional as F
 import yaml
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay, roc_curve, auc
+from sklearn.manifold import TSNE
 
 from src.config import load_config, load_search_space, _deep_merge
 from src.data.loader import DataManager
@@ -87,11 +94,11 @@ class AutonomousOrchestrator:
         """Merge LLM-proposed config overrides into the base config."""
         return _deep_merge(self.config, llm_config)
 
-    def _run_single_experiment(self, experiment_config: dict, experiment_id: str) -> dict | None:
+    def _run_single_experiment(self, experiment_config: dict, experiment_id: str) -> tuple:
         """
         Run a single training experiment with the given config.
 
-        Returns metrics dict or None if the experiment failed.
+        Returns (metrics, history, model, data) or (None, None, None, None) on failure.
         """
         try:
             # Re-prepare data with the experiment's config (may differ in scaler/oversampling)
@@ -123,12 +130,12 @@ class AutonomousOrchestrator:
             if trainer.best_model_state is not None:
                 self.tracker.log_model(experiment_id, trainer.best_model_state)
 
-            return metrics
+            return metrics, trainer.history, model, data
 
         except Exception as e:
             logger.error(f"Experiment {experiment_id} failed: {e}", exc_info=True)
             console.print(f"  [red]Experiment failed: {e}[/red]")
-            return None
+            return None, None, None, None
 
     def run(self) -> dict:
         """
@@ -148,6 +155,10 @@ class AutonomousOrchestrator:
         ))
 
         best_auroc = 0.0
+        best_model = None
+        best_data = None
+        best_config = None
+        best_experiment_id = None
         no_improvement_count = 0
         search_space_str = self._format_search_space()
 
@@ -188,16 +199,45 @@ class AutonomousOrchestrator:
 
             # --- Step 2: Start experiment ---
             experiment_id = self.tracker.start_experiment(experiment_config)
-            console.print(f"  Experiment ID: [bold]{experiment_id}[/bold]")
 
+            # --- Verbose config printout ---
             arch = experiment_config.get("model", {}).get("architecture", "mlp")
-            lr = experiment_config.get("training", {}).get("lr", "?")
-            bs = experiment_config.get("training", {}).get("batch_size", "?")
-            console.print(f"  Config: arch={arch}, lr={lr}, batch_size={bs}")
+            train_cfg = experiment_config.get("training", {})
+            data_cfg = experiment_config.get("data", {})
+            model_cfg = experiment_config.get("model", {})
+            arch_params = model_cfg.get(arch, {})
+
+            config_lines = [
+                f"[bold]Experiment ID:[/bold] {experiment_id}",
+                f"[bold]Architecture:[/bold] {arch}",
+            ]
+            # Architecture-specific params
+            for k, v in arch_params.items():
+                config_lines.append(f"  {k}: {v}")
+            # Training params
+            config_lines.append(f"[bold]Optimizer:[/bold] {train_cfg.get('optimizer', 'adamw')}")
+            config_lines.append(f"[bold]Learning rate:[/bold] {train_cfg.get('lr', 0.001)}")
+            config_lines.append(f"[bold]Batch size:[/bold] {train_cfg.get('batch_size', 64)}")
+            config_lines.append(f"[bold]Epochs:[/bold] {train_cfg.get('epochs', 200)}")
+            config_lines.append(f"[bold]Scheduler:[/bold] {train_cfg.get('scheduler', 'cosine')}")
+            config_lines.append(f"[bold]Weight decay:[/bold] {train_cfg.get('weight_decay', 0.0001)}")
+            config_lines.append(f"[bold]Label smoothing:[/bold] {train_cfg.get('label_smoothing', 0.0)}")
+            config_lines.append(f"[bold]Gradient clip:[/bold] {train_cfg.get('gradient_clip', 0.0)}")
+            config_lines.append(f"[bold]Class weighting:[/bold] {train_cfg.get('class_weighting', False)}")
+            config_lines.append(f"[bold]Oversampling:[/bold] {train_cfg.get('oversampling', False)}")
+            config_lines.append(f"[bold]Scaler:[/bold] {data_cfg.get('scaler', 'standard')}")
+            aug = data_cfg.get("augmentation", {})
+            config_lines.append(f"[bold]Mixup:[/bold] {aug.get('mixup', False)} (alpha={aug.get('mixup_alpha', 0.2)})")
+
+            console.print(Panel(
+                "\n".join(config_lines),
+                title=f"Experiment {i} Configuration",
+                border_style="blue",
+            ))
 
             # --- Step 3: Train ---
             start_time = time.time()
-            metrics = self._run_single_experiment(experiment_config, experiment_id)
+            metrics, history, model, exp_data = self._run_single_experiment(experiment_config, experiment_id)
             duration = time.time() - start_time
 
             if metrics is None:
@@ -212,11 +252,28 @@ class AutonomousOrchestrator:
             self.registry.register(experiment_id, experiment_config)
 
             val_auroc = metrics.get("val_auroc", 0.0)
-            console.print(f"  [green]val_auroc: {val_auroc:.5f}[/green] (duration: {duration:.1f}s)")
+            console.print(Panel(
+                f"[bold]val_auroc:[/bold] {val_auroc:.5f}\n"
+                f"[bold]val_f1:[/bold] {metrics.get('val_f1', 0.0):.5f}\n"
+                f"[bold]val_accuracy:[/bold] {metrics.get('val_accuracy', 0.0):.5f}\n"
+                f"[bold]Duration:[/bold] {duration:.1f}s",
+                title=f"Experiment {experiment_id} Results",
+                border_style="green",
+            ))
+
+            # --- Generate training curves ---
+            if history and history.get("epoch"):
+                exp_dir = Path(self.tracker.base_dir) / experiment_id
+                self._plot_training_curves(history, exp_dir, experiment_id, arch)
+                console.print(f"  [cyan]Training curves saved to {exp_dir}/training_curves.png[/cyan]")
 
             # Track improvement
             if val_auroc > best_auroc + self.plateau_threshold:
                 best_auroc = val_auroc
+                best_model = model
+                best_data = exp_data
+                best_config = experiment_config
+                best_experiment_id = experiment_id
                 no_improvement_count = 0
                 console.print(f"  [bold green]New best! val_auroc = {best_auroc:.5f}[/bold green]")
             else:
@@ -249,6 +306,13 @@ class AutonomousOrchestrator:
 
         self._print_leaderboard()
 
+        # --- Winning model visualizations ---
+        if best_model is not None and best_data is not None:
+            winner_dir = Path(self.tracker.base_dir) / best_experiment_id
+            console.print(f"\n[bold cyan]Generating winning model visualizations ({best_experiment_id})...[/bold cyan]")
+            self._plot_winner_analysis(best_model, best_data, best_config, winner_dir)
+            console.print(f"  [cyan]Winner analysis saved to {winner_dir}/[/cyan]")
+
         report = self.llm_agent.generate_report(
             experiment_history=self.tracker.format_history_for_llm(),
             best_result=self._format_best(),
@@ -272,12 +336,18 @@ class AutonomousOrchestrator:
 
         experiment_id = self.tracker.start_experiment(config)
         start_time = time.time()
-        metrics = self._run_single_experiment(config, experiment_id)
+        metrics, history, model, exp_data = self._run_single_experiment(config, experiment_id)
         duration = time.time() - start_time
 
         if metrics:
             self.tracker.log_metrics(experiment_id, metrics)
             self.tracker.finish_experiment(experiment_id, metrics, duration)
+            # Generate training curves for single experiments too
+            if history and history.get("epoch"):
+                exp_dir = Path(self.tracker.base_dir) / experiment_id
+                arch = config.get("model", {}).get("architecture", "mlp")
+                self._plot_training_curves(history, exp_dir, experiment_id, arch)
+                console.print(f"  [cyan]Training curves saved to {exp_dir}/training_curves.png[/cyan]")
         else:
             self.tracker.finish_experiment(experiment_id, {"error": True}, duration)
 
@@ -294,6 +364,224 @@ class AutonomousOrchestrator:
             f"val_accuracy={best['metrics'].get('val_accuracy', 'N/A')} | "
             f"Architecture: {best['config'].get('model', {}).get('architecture', 'N/A')}"
         )
+
+    # ------------------------------------------------------------------
+    # Visualization helpers
+    # ------------------------------------------------------------------
+
+    def _plot_training_curves(self, history: dict, exp_dir: Path, exp_id: str, arch: str):
+        """Generate training loss and validation metric curves for an experiment."""
+        exp_dir.mkdir(parents=True, exist_ok=True)
+        epochs = history["epoch"]
+        if not epochs:
+            return
+
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        fig.suptitle(f"Training Curves — {exp_id} ({arch})", fontsize=14, fontweight="bold")
+
+        # 1. Training loss
+        ax = axes[0, 0]
+        ax.plot(epochs, history["train_loss"], color="#E53935", linewidth=2, label="Train Loss")
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Loss")
+        ax.set_title("Training Loss")
+        ax.legend()
+        ax.grid(alpha=0.3)
+
+        # 2. Validation AUC-ROC
+        ax = axes[0, 1]
+        ax.plot(epochs, history["val_auroc"], color="#1E88E5", linewidth=2, label="Val AUC-ROC")
+        best_idx = int(np.argmax(history["val_auroc"]))
+        ax.scatter([epochs[best_idx]], [history["val_auroc"][best_idx]], color="gold",
+                   s=100, zorder=5, edgecolors="black", label=f"Best: {history['val_auroc'][best_idx]:.4f}")
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("AUC-ROC")
+        ax.set_title("Validation AUC-ROC")
+        ax.legend()
+        ax.grid(alpha=0.3)
+
+        # 3. Validation Accuracy & F1
+        ax = axes[1, 0]
+        ax.plot(epochs, history["val_accuracy"], color="#43A047", linewidth=2, label="Val Accuracy")
+        ax.plot(epochs, history["val_f1"], color="#FB8C00", linewidth=2, label="Val F1 (macro)")
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Score")
+        ax.set_title("Validation Accuracy & F1")
+        ax.legend()
+        ax.grid(alpha=0.3)
+
+        # 4. Learning rate schedule
+        ax = axes[1, 1]
+        ax.plot(epochs, history["lr"], color="#8E24AA", linewidth=2, label="Learning Rate")
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("LR")
+        ax.set_title("Learning Rate Schedule")
+        ax.set_yscale("log")
+        ax.legend()
+        ax.grid(alpha=0.3)
+
+        fig.tight_layout()
+        fig.savefig(str(exp_dir / "training_curves.png"), dpi=150, bbox_inches="tight")
+        plt.close(fig)
+
+    @torch.no_grad()
+    def _plot_winner_analysis(self, model, data: dict, config: dict, output_dir: Path):
+        """Generate comprehensive visualizations of what the winning model learned."""
+        output_dir.mkdir(parents=True, exist_ok=True)
+        model.eval()
+        model = model.to(self.device)
+
+        X_val = data["X_val"]
+        y_val = data["y_val"]
+        class_names = data["class_names"]
+        num_classes = data["num_classes"]
+
+        X_tensor = torch.tensor(X_val, dtype=torch.float32, device=self.device)
+        logits = model(X_tensor)
+        proba = F.softmax(logits, dim=1).cpu().numpy()
+        preds = np.argmax(proba, axis=1)
+
+        # ---- Figure 1: Confusion Matrix ----
+        fig, ax = plt.subplots(figsize=(10, 8))
+        cm = confusion_matrix(y_val, preds)
+        disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=class_names)
+        disp.plot(ax=ax, cmap="Blues", values_format="d", xticks_rotation=45)
+        ax.set_title("Winning Model — Confusion Matrix", fontsize=14, fontweight="bold")
+        fig.tight_layout()
+        fig.savefig(str(output_dir / "confusion_matrix.png"), dpi=150, bbox_inches="tight")
+        plt.close(fig)
+
+        # ---- Figure 2: Per-class ROC curves ----
+        fig, ax = plt.subplots(figsize=(10, 8))
+        from sklearn.preprocessing import label_binarize
+        y_bin = label_binarize(y_val, classes=list(range(num_classes)))
+        colors = plt.cm.tab10(np.linspace(0, 1, num_classes))
+        for cls_idx in range(num_classes):
+            if y_bin[:, cls_idx].sum() == 0:
+                continue
+            fpr, tpr, _ = roc_curve(y_bin[:, cls_idx], proba[:, cls_idx])
+            roc_auc = auc(fpr, tpr)
+            ax.plot(fpr, tpr, color=colors[cls_idx], linewidth=1.5,
+                    label=f"{class_names[cls_idx]} (AUC={roc_auc:.3f})")
+        ax.plot([0, 1], [0, 1], "k--", alpha=0.5, linewidth=1)
+        ax.set_xlabel("False Positive Rate")
+        ax.set_ylabel("True Positive Rate")
+        ax.set_title("Winning Model — Per-Class ROC Curves", fontsize=14, fontweight="bold")
+        ax.legend(loc="lower right", fontsize=8)
+        ax.grid(alpha=0.3)
+        fig.tight_layout()
+        fig.savefig(str(output_dir / "roc_curves.png"), dpi=150, bbox_inches="tight")
+        plt.close(fig)
+
+        # ---- Figure 3: Feature importance via gradient-based saliency ----
+        fig, ax = plt.subplots(figsize=(10, 6))
+        X_grad = torch.tensor(X_val, dtype=torch.float32, device=self.device, requires_grad=True)
+        model.zero_grad()
+        out = model(X_grad)
+        # Sum of all class logits w.r.t. input — average absolute gradient
+        out.sum().backward()
+        importance = X_grad.grad.abs().mean(dim=0).cpu().numpy()
+
+        # Try to get feature names from the dataframe
+        try:
+            import pandas as pd
+            data_cfg = config.get("data", {})
+            df = pd.read_csv(data_cfg["path"], nrows=1)
+            feature_names = [c for c in df.columns if c != data_cfg.get("target_column", "name")]
+        except Exception:
+            feature_names = [f"Feature {j}" for j in range(len(importance))]
+
+        sorted_idx = np.argsort(importance)[::-1]
+        ax.barh(range(len(importance)), importance[sorted_idx], color="#1976D2", edgecolor="white")
+        ax.set_yticks(range(len(importance)))
+        ax.set_yticklabels([feature_names[j] for j in sorted_idx])
+        ax.invert_yaxis()
+        ax.set_xlabel("Mean |Gradient|")
+        ax.set_title("Winning Model — Feature Importance (Gradient Saliency)", fontsize=14, fontweight="bold")
+        ax.grid(axis="x", alpha=0.3)
+        fig.tight_layout()
+        fig.savefig(str(output_dir / "feature_importance.png"), dpi=150, bbox_inches="tight")
+        plt.close(fig)
+
+        # ---- Figure 4: t-SNE of learned representations ----
+        fig, axes = plt.subplots(1, 2, figsize=(16, 7))
+
+        # Left: t-SNE of raw input features
+        tsne = TSNE(n_components=2, random_state=42, perplexity=min(30, len(X_val) - 1))
+        X_2d_raw = tsne.fit_transform(X_val)
+        ax = axes[0]
+        scatter = ax.scatter(X_2d_raw[:, 0], X_2d_raw[:, 1], c=y_val, cmap="tab10",
+                            s=15, alpha=0.7, edgecolors="none")
+        ax.set_title("t-SNE of Raw Input Features", fontsize=12, fontweight="bold")
+        ax.set_xlabel("t-SNE 1")
+        ax.set_ylabel("t-SNE 2")
+
+        # Right: t-SNE of model's penultimate layer representations
+        # Extract representations by hooking the layer before the classification head
+        representations = []
+        def _hook(module, inp, out):
+            representations.append(inp[0].detach().cpu())
+
+        # Find the classification head (last linear layer named 'head')
+        head = None
+        for name, module in model.named_modules():
+            if name == "head":
+                head = module
+                break
+        if head is None:
+            # Fallback: use last Linear layer
+            for module in reversed(list(model.modules())):
+                if isinstance(module, torch.nn.Linear):
+                    head = module
+                    break
+
+        if head is not None:
+            handle = head.register_forward_hook(_hook)
+            with torch.no_grad():
+                model(X_tensor)
+            handle.remove()
+
+            if representations:
+                reps = representations[0].numpy()
+                tsne2 = TSNE(n_components=2, random_state=42, perplexity=min(30, len(reps) - 1))
+                X_2d_learned = tsne2.fit_transform(reps)
+                ax = axes[1]
+                ax.scatter(X_2d_learned[:, 0], X_2d_learned[:, 1], c=y_val, cmap="tab10",
+                          s=15, alpha=0.7, edgecolors="none")
+                ax.set_title("t-SNE of Learned Representations", fontsize=12, fontweight="bold")
+                ax.set_xlabel("t-SNE 1")
+                ax.set_ylabel("t-SNE 2")
+
+        # Shared colorbar
+        cbar = fig.colorbar(scatter, ax=axes, shrink=0.8, pad=0.02)
+        cbar.set_label("Class")
+        if len(class_names) <= 15:
+            cbar.set_ticks(range(len(class_names)))
+            cbar.set_ticklabels(class_names)
+
+        fig.suptitle("Winning Model — What It Learned (Representation Space)",
+                     fontsize=14, fontweight="bold")
+        fig.tight_layout()
+        fig.savefig(str(output_dir / "learned_representations.png"), dpi=150, bbox_inches="tight")
+        plt.close(fig)
+
+        # ---- Figure 5: Prediction confidence distribution ----
+        fig, ax = plt.subplots(figsize=(10, 6))
+        max_proba = np.max(proba, axis=1)
+        correct = preds == y_val
+        ax.hist(max_proba[correct], bins=30, alpha=0.7, color="#43A047", label="Correct", density=True)
+        ax.hist(max_proba[~correct], bins=30, alpha=0.7, color="#E53935", label="Incorrect", density=True)
+        ax.set_xlabel("Prediction Confidence (max probability)")
+        ax.set_ylabel("Density")
+        ax.set_title("Winning Model — Prediction Confidence Distribution", fontsize=14, fontweight="bold")
+        ax.legend()
+        ax.grid(alpha=0.3)
+        fig.tight_layout()
+        fig.savefig(str(output_dir / "confidence_distribution.png"), dpi=150, bbox_inches="tight")
+        plt.close(fig)
+
+        console.print(f"  Saved: confusion_matrix.png, roc_curves.png, feature_importance.png, "
+                      f"learned_representations.png, confidence_distribution.png")
 
     def _print_leaderboard(self):
         """Print a formatted leaderboard table."""

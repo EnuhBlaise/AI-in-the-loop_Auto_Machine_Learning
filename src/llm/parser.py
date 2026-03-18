@@ -5,9 +5,17 @@ import re
 
 
 def extract_json(text: str) -> dict:
-    """Extract the first valid JSON object from LLM output text."""
-    # Try direct parse first
+    """Extract the first valid JSON object from LLM output text.
+
+    Handles Qwen-style <think>...</think> blocks, markdown code fences,
+    and raw JSON responses.
+    """
     text = text.strip()
+
+    # Strip Qwen-style <think>...</think> reasoning blocks
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+
+    # Try direct parse first
     if text.startswith("{"):
         try:
             return json.loads(text)

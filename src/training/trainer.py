@@ -68,6 +68,14 @@ class Trainer:
 
         self._best_model_state: Optional[Dict[str, Any]] = None
         self._evaluator = Evaluator()
+        self._history: Dict[str, list] = {
+            "epoch": [],
+            "train_loss": [],
+            "val_auroc": [],
+            "val_f1": [],
+            "val_accuracy": [],
+            "lr": [],
+        }
 
     # ------------------------------------------------------------------
     # Public API
@@ -181,6 +189,15 @@ class Trainer:
                     metrics = self._validate(X_val, y_val, num_classes)
                     metric_value = metrics.get(primary_metric, 0.0)
 
+                    # Record history
+                    current_lr = optimizer.param_groups[0]["lr"]
+                    self._history["epoch"].append(epoch)
+                    self._history["train_loss"].append(train_loss)
+                    self._history["val_auroc"].append(metrics.get("val_auroc", 0.0))
+                    self._history["val_f1"].append(metrics.get("val_f1", 0.0))
+                    self._history["val_accuracy"].append(metrics.get("val_accuracy", 0.0))
+                    self._history["lr"].append(current_lr)
+
                     logger.info(
                         "Epoch %d/%d  train_loss=%.4f  %s",
                         epoch,
@@ -227,6 +244,11 @@ class Trainer:
     def best_model_state(self) -> Optional[Dict[str, Any]]:
         """State dict of the best-performing model (by primary metric)."""
         return self._best_model_state
+
+    @property
+    def history(self) -> Dict[str, list]:
+        """Per-epoch training history (epoch, train_loss, val metrics, lr)."""
+        return self._history
 
     # ------------------------------------------------------------------
     # Training helpers
