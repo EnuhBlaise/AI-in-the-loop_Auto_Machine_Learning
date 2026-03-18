@@ -2,10 +2,15 @@
 
 import logging
 import sys
+from pathlib import Path
 
 import click
+from dotenv import load_dotenv
 from rich.console import Console
 from rich.logging import RichHandler
+
+# Load .env file so HF_TOKEN and other env vars are available automatically
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 console = Console()
 

@@ -24,8 +24,13 @@ import logging
 import sys
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# Load .env file so HF_TOKEN and other env vars are available automatically
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 
 def main():
